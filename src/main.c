@@ -180,16 +180,10 @@ int main(void)
     }
     LOG_INFO("main", "All producers finished — waiting for workers to drain queue ...");
 
-    /* Poll until the queue is empty before shutting down.
-       This ensures all submitted tasks are executed, not discarded. */
-    while (queue_size(&pool->queue) > 0) {
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L}; /* 10 ms */
-        nanosleep(&ts, NULL);
-    }
-
-    /* Brief pause to let workers finish the last task they already dequeued */
-    struct timespec settle = {.tv_sec = 0, .tv_nsec = 100000000L}; /* 100 ms */
-    nanosleep(&settle, NULL);
+    /* Block until all submitted tasks have been fully executed.
+       This replaces the old poll + fixed sleep, which was racy: workers could
+       still be mid-task when the sleep expired, causing metrics to under-count. */
+    thread_pool_wait_idle(pool);
 
     /* Print metrics before destroying the pool (destruction discards them) */
     PoolMetrics metrics = thread_pool_get_metrics(pool);
