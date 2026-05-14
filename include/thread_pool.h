@@ -30,6 +30,8 @@ typedef struct {
     int             running;       /* 1 = accepting tasks, 0 = shutting down  */
     PoolMetrics     metrics;       /* execution statistics                    */
     pthread_mutex_t metrics_mutex; /* guards concurrent writes to metrics     */
+    int             active_tasks;  /* tasks currently executing in workers    */
+    pthread_cond_t  all_idle;      /* signalled when active_tasks reaches 0   */
 } ThreadPool;
 
 /* ── API ──────────────────────────────────────────────────────────────────── */
@@ -110,5 +112,19 @@ PoolMetrics thread_pool_get_metrics(ThreadPool *pool);
  * Returns: nothing
  */
 void thread_pool_print_metrics(const PoolMetrics *metrics);
+
+/*
+ * thread_pool_wait_idle
+ * ---------------------
+ * Blocks until both the queue is empty AND all workers have finished their
+ * current tasks (active_tasks == 0). Use this instead of a fixed sleep
+ * before reading metrics or calling destroy.
+ *
+ * Parameters:
+ *   pool — pointer to the ThreadPool.
+ *
+ * Returns: nothing
+ */
+void thread_pool_wait_idle(ThreadPool *pool);
 
 #endif /* THREAD_POOL_H */

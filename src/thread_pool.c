@@ -37,6 +37,11 @@ static void *worker_func(void *arg)
             continue;
         }
 
+        /* Track that this worker is now busy executing a task */
+        pthread_mutex_lock(&pool->metrics_mutex);
+        pool->active_tasks++;
+        pthread_mutex_unlock(&pool->metrics_mutex);
+
         /* Measure wall-clock time for this task using a monotonic clock
            (CLOCK_MONOTONIC is not affected by system time adjustments) */
         struct timespec t_start, t_end;
@@ -53,10 +58,13 @@ static void *worker_func(void *arg)
         /* Worker owns the task after dequeue — free it now that it is done */
         task_destroy(task);
 
-        /* Update shared metrics under the metrics mutex to avoid data races */
+        /* Update shared metrics and decrement active count under the same lock */
         pthread_mutex_lock(&pool->metrics_mutex);
         pool->metrics.tasks_completed++;
         pool->metrics.total_exec_seconds += elapsed;
+        pool->active_tasks--;
+        if (pool->active_tasks == 0)
+            pthread_cond_broadcast(&pool->all_idle);
         pthread_mutex_unlock(&pool->metrics_mutex);
     }
 
@@ -100,6 +108,16 @@ ThreadPool *thread_pool_create(int thread_count, int queue_capacity, Error *err)
         if (err) error_set(err, ERR_MUTEX_INIT, "thread_pool",
                            "thread_pool_create",
                            "failed to init metrics_mutex");
+        queue_destroy(&pool->queue);
+        free(pool);
+        return NULL;
+    }
+
+    if (pthread_cond_init(&pool->all_idle, NULL) != 0) {
+        if (err) error_set(err, ERR_COND_INIT, "thread_pool",
+                           "thread_pool_create",
+                           "failed to init all_idle cond");
+        pthread_mutex_destroy(&pool->metrics_mutex);
         queue_destroy(&pool->queue);
         free(pool);
         return NULL;
@@ -166,6 +184,7 @@ void thread_pool_destroy(ThreadPool *pool)
 
     /* Release all resources in reverse initialisation order */
     queue_destroy(&pool->queue);
+    pthread_cond_destroy(&pool->all_idle);
     pthread_mutex_destroy(&pool->metrics_mutex);
     free(pool->threads);
     free(pool);
@@ -217,6 +236,19 @@ PoolMetrics thread_pool_get_metrics(ThreadPool *pool)
     snap = pool->metrics;
     pthread_mutex_unlock(&pool->metrics_mutex);
     return snap;
+}
+
+void thread_pool_wait_idle(ThreadPool *pool)
+{
+    if (!pool) return;
+
+    pthread_mutex_lock(&pool->metrics_mutex);
+    /* Wait until no task is being actively executed AND the queue is empty.
+       We must check queue_size under the mutex to avoid a TOCTOU race where
+       a worker finishes (active_tasks → 0) but a producer is still enqueuing. */
+    while (pool->active_tasks > 0 || queue_size(&pool->queue) > 0)
+        pthread_cond_wait(&pool->all_idle, &pool->metrics_mutex);
+    pthread_mutex_unlock(&pool->metrics_mutex);
 }
 
 void thread_pool_print_metrics(const PoolMetrics *m)
