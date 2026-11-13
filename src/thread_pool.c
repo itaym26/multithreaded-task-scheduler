@@ -129,6 +129,7 @@ ThreadPool *thread_pool_create(int thread_count, int queue_capacity, Error *err)
         if (err) error_set(err, ERR_MEMORY_ALLOC, "thread_pool",
                            "thread_pool_create",
                            "failed to allocate thread array");
+        pthread_cond_destroy(&pool->all_idle);
         pthread_mutex_destroy(&pool->metrics_mutex);
         queue_destroy(&pool->queue);
         free(pool);
@@ -207,6 +208,9 @@ int thread_pool_submit(ThreadPool *pool, Task *task, Error *err)
         return -1;
     }
 
+    /* The worker may free task immediately after enqueue succeeds. */
+    const int task_id = task->id;
+    const int task_priority = task->priority;
     Error q_err;
     error_init(&q_err);
 
@@ -222,7 +226,7 @@ int thread_pool_submit(ThreadPool *pool, Task *task, Error *err)
     pthread_mutex_unlock(&pool->metrics_mutex);
 
     LOG_DEBUG("thread_pool", "Submitted task id=%-4d priority=%d",
-              task->id, task->priority);
+              task_id, task_priority);
     return 0;
 }
 
@@ -243,10 +247,10 @@ void thread_pool_wait_idle(ThreadPool *pool)
     if (!pool) return;
 
     pthread_mutex_lock(&pool->metrics_mutex);
-    /* Wait until no task is being actively executed AND the queue is empty.
-       We must check queue_size under the mutex to avoid a TOCTOU race where
-       a worker finishes (active_tasks → 0) but a producer is still enqueuing. */
-    while (pool->active_tasks > 0 || queue_size(&pool->queue) > 0)
+    /* Completed/submitted counters remain accurate while a dequeued task
+       has not yet incremented active_tasks. The caller must finish submitting
+       its batch before waiting; future submissions are not covered. */
+    while (pool->metrics.tasks_completed < pool->metrics.tasks_submitted)
         pthread_cond_wait(&pool->all_idle, &pool->metrics_mutex);
     pthread_mutex_unlock(&pool->metrics_mutex);
 }
