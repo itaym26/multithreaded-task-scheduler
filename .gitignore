@@ -1,4 +1,5 @@
 build/
 *.o
+/scheduler
 compile_commands.json
 .vscode/
